@@ -1,3 +1,112 @@
+---
+class: center, middle
+
+I don't think we should show the pieces diagrams again
+Instead just enumerate them
+
+also make a graphic showing aggregates 1 per id
+
+many games, many teams, many checks
+
+maybe a game aggregate building up from many commands
+
+Team
+
+Add a recap of all the Commands and Events
+Then show how each one builds up an aggregate
+
+Dispatch(RegTeam{id: 123, name: "A"})
+* The router will look for the pid of a GenServer {:aggregate, Team, 123}* in the Registry (Not there)
+* Spawn a new GenServer named {:aggregate, Team, 123}*
+* Send it the command as a message
+* Allow & Emit TeamReg Event
+* It will be stored in the EventStore for us in the stream "team_123"*
+
+* Only true in concept
+
+Add Player 1
+* Locate GenServer {:aggregate, Team, 123} in the Registry
+* It's there, send it the command as a message
+* Allow & Emity PlayerJoinedTeamEvent
+* Appended to the Event store as the 2nd event in the stream "team_123"
+
+*Kick over server*
+Add player 1
+* Lookup {:aggregate, Team, 123}* in the Registry
+* It's not there, spawn a new GenServer named {:aggregate, Team, 123}*
+* load all the events in EventStore for stream "team_123"
+* apply them 1 by 1, changing the GenServer's state
+* Reject the command as Player 1 is already on the team.
+
+
+~3/4~ flat view of stack of commands filling up a number of game and team aggregates
+
+register team a
+add player 1 to team a
+register team b
+add player 2 to team b
+add player 3 to team b
+schedule game a for team a
+schedule game b for team b
+cancel game a
+start game a => fail
+add player 1 to teama (again) => fail
+
+
+TeamRegistered{name: "A")
+PlayerJoinedTeam{
+TeamRegistered
+register team b
+add player 2 to team b
+add player 3 to team b
+schedule game a for team a
+schedule game b for team b
+cancel game a
+
+
+
+NOW you are ready to show them the code version.
+
+We've already seen the commands and events
+But they look like this:
+Show 1 command and 1 Event on the same slide
+try to pick one where the event contains some extra info from the state
+
+---
+
+Now show the aggregate in skeletal form with the struct, two execs and two apply funcs
+
+--
+
+now show the game aggregate with the validation
+
+--
+
+From here, they have a conceptual grounding in the aggregate, command, events and their roles.
+Recap, talking about accepting all the writes, but the system can't show anybody anything, time for read side
+
+Show Event Handler for projections
+Show Event Handler for side effects (email)
+Show That Event Handlers are a single named genserver
+
+Recap the pattern so far, we can repeat this all day but something is missing
+
+Show Process manager
+layout the problem
+graphic
+implemtnation
+tak about the lifecycle and how each PM instance is a GenServer
+
+Recap?
+Commands are sent to Aggregates, which validate them and emit events
+Events are stored in the EventStore in streams which correspond to aggregates
+EventHandlers perform sideeffect and create projections
+ProcessManagers coordinate between aggregates behind the scenes
+
+
+
+---
+
 class: center, middle
 
 # Ben Moss
@@ -139,12 +248,22 @@ You can imagine working from an acceptance test something like this.
 
 ---
 class:
+
+# An acceptance test to work from
+
+```elixir
+# Schedule a game for that team
+game_id = Attend.schedule_game(team_id, "Blah Park", @game_time)
+```
+
+
+---
+class:
 # The API, Command and Router
 
 * Commands are structs
 * The router dispatches commands for us.
-* IDs can be generated or passed in
-* Nothing else is returned. We don't read here, this is the write side.
+* Nothing is returned. We don't read here, this is the write side.
 
 ```elixir
 defmodule Attend
@@ -207,7 +326,7 @@ class:
 
 * Maps commands to aggregates
 * Specifies an indentity
-* Will find or create the GenServer for aggregate + identity
+* Will find or create a GenServer by aggregate type & identity
 
 ```elixir
 defmodule Attend.CommandRouter do
@@ -227,7 +346,9 @@ end
 
 ???
 
-Here we map the ScheduleGame command to the Game. Commanded will spawn a GenServer based on the identity and module type given.
+* Here we map the ScheduleGame command to the Game.
+* Commanded will spawn a GenServer based on the identity and module type given.
+* That means we're going to create a new aggregate and spawn a GenServer to listen for commands on, and then we're going to send it the command to handle.
 
 ---
 class:
@@ -236,7 +357,6 @@ class:
 
 * Is a module with a struct
 * Is backed by a GenServer and spawned lazily
-* Can be spun down after a period of inactivity
 * Allows serial access to an instance of an aggregate
 
 ```elixir
@@ -268,15 +388,16 @@ class:
 ### (as Command Handler)
 
 * Returns an error tuple or 0 or more events
+* Written to the event store for us
 
 ```elixir
-  def execute(%Game{} = game, %ScheduleGame{} = command) do
+  def execute(%Game{} = _game, %ScheduleGame{} = command) do
     %GameScheduled{
       game_id: command.game_id,
       team_id: command.team_id,
       location: command.location,
       start_time: command.start_time
-    }
+    } # Will be written to the event store
   end
 ```
 
@@ -322,7 +443,7 @@ class:
 ### (applying events for new state)
 
 * Apply clause for each event on an aggregate
-* Take the old state and event as input
+* Takes the previous state and an event as input
 * Returns the new state
 * Applied after the events have been persisted
 * Also applied when re-hydrating the aggregate
@@ -377,6 +498,40 @@ Here we're setting up the initial state of our Game so we can validate further c
 ???
 
 Here we're handling another command against our aggregate. We only want to allow an attendance check if the game scheduled. We also want to provide meaningful feedback to the user if we reject the command.
+
+---
+# The Aggregate
+
+```elixir
+defmodule Attend.Aggregates.Game do
+  defstruct [
+    :game_id,
+    :location,
+    :team_id,
+    :start_time,
+    :status
+  ]
+
+  def execute(%Game{} = game, %ScheduleGame{} = command) do
+    %GameScheduled{...}
+  end
+
+  def execute(%Game{} = game, %CheckAttendance{} = command) do
+    %AttendanceCheckStarted{...}
+  end
+
+  def apply(%Game{} = game, %GameScheduled{} = event) do
+   %{game | status: :scheduled}
+  end
+
+  def apply(%Game{} = game, %CheckAttendance{} = event) do
+    ...
+  end
+```
+
+???
+
+Here is what our Game aggregate looks like
 
 ---
 class:
@@ -452,9 +607,21 @@ We start off by listening for the Team Register even and persist that to disk. S
 ---
 
 
-# Team projection
+# TeamDetail projection
 
 ```elixir
+defmodule Attend.EventHandlers.TeamProjector do
+  use Commanded.Event.Handler, name: __MODULE__
+
+  def handle(%Events.TeamRegistered{} = event, _metadata) do
+    TeamDetail.insert(%Team{
+      id: event.team_id,
+      name: event.name,
+      players: []
+    })
+    :ok
+  end
+
   def handle(%Events.JoinedTeam{} = event, _metadata) do
     TeamDetail.get(event.team_id)
     |> TeamDetail.add_player(event.player)
@@ -474,7 +641,7 @@ For subsequent team events, we can update the state
 
 ---
 
-# Team projection
+# TeamDetail projection
 
 ```elixir
   def handle(%Events.GameScheduled{} = event, _metadata) do
@@ -503,8 +670,90 @@ For subsequent team events, we can update the state
 Event handlers can use events from across aggregates to build up their state
 
 ---
+class: inverse, center, middle
 
-We've seen enough of the basic now that we can continue this way for a long while:
+# Sending the attendance email
+
+---
+
+# Sending the attendance email
+
+```elixir
+Attend.check_attendance(game_id, team_id)
+```
+
+---
+
+# Sending the attendance email
+
+```elixir
+Attend.check_attendance(game_id, team_id)
+```
+
+* A game must have been scheduled
+* An attedance check must have been requested
+* Use an Event handler to listen for games to be scheduled
+* And send an email when attendance is asked for a player on a team in a game.
+
+---
+
+# Sending the attendance email
+
+```elixir
+# Check the attendance for the game and that team
+Attend.check_attendance(game_id, team_id)
+```
+
+* A game must have been scheduled
+* An attedance check must have been requested
+---
+![Event Sourcing Diagram](images/attend_emailer_01.svg)
+
+???
+
+---
+![Event Sourcing Diagram](images/attend_emailer_02.svg)
+
+???
+
+---
+![Event Sourcing Diagram](images/attend_emailer_03.svg)
+
+???
+
+---
+![Event Sourcing Diagram](images/attend_emailer_04.svg)
+
+???
+
+---
+![Event Sourcing Diagram](images/attend_emailer_05.svg)
+
+???
+
+---
+![Event Sourcing Diagram](images/attend_emailer_06.svg)
+
+???
+
+---
+![Event Sourcing Diagram](images/attend_emailer_07.svg)
+
+???
+
+---
+![Event Sourcing Diagram](images/attend_emailer_08.svg)
+
+???
+
+---
+![Event Sourcing Diagram](images/attend_emailer_09.svg)
+
+???
+
+---
+
+# A pattern emerges:
 * Register team
 * Add player
 * Remove player
@@ -512,7 +761,12 @@ We've seen enough of the basic now that we can continue this way for a long whil
 * Start game
 * End game
 
-Will all follow this basic pattern more or less. We can continue to add projections and handlers as we've seen. There's one problem though.
+???
+
+We've seen enough of the basic now that we can continue this way for a long while.
+All of these features follow this basic pattern more or less.
+We can continue to add projections and handlers as we've seen.
+There's a problem though.
 
 We can see it when we go to request attendance for a team's players to a game.
 
@@ -525,24 +779,67 @@ We can see it when we go to request attendance for a team's players to a game.
 * Ask each player from a given *Team* if they will be attending a given Game.
 * Wait to hear from each player
 
-### Which aggregates do we need?
+???
+
+We've got all the data we need, but we can't cross aggregate boundaries to get at it.
+
+---
+
+# Attendance Check
+
+### Requirements
+* Don't allow a *Check* to be requested for a *Game* that has ended or been cancelled.
+* Ask each player from a given *Team* if they will be attending a given Game.
+* Wait to hear from each player
+
+### Which aggregate will handle the command?
+
+???
+
+---
+
+# Attendance Check
+
+### Requirements
+* Don't allow a *Check* to be requested for a *Game* that has ended or been cancelled.
+* Ask each player from a given *Team* if they will be attending a given Game.
+* Wait to hear from each player
+
+### Which aggregate will handle the command?
+1. We need to validate against the status of Game, so Game?
+
+???
+
+---
+
+# Attendance Check
+
+### Requirements
+* Don't allow a *Check* to be requested for a *Game* that has ended or been cancelled.
+* Ask each player from a given *Team* if they will be attending a given Game.
+* Wait to hear from each player
+
+### Which aggregate will handle the command?
+1. We need to validate against the status of Game, so Game?
+2. We need the list of players that Team has, so Team?
+
+???
+
+---
+
+# Attendance Check
+
+### Requirements
+* Don't allow a *Check* to be requested for a *Game* that has ended or been cancelled.
+* Ask each player from a given *Team* if they will be attending a given Game.
+* Wait to hear from each player
+
+### Which aggregate will handle the command?
 1. We need to validate against the status of Game, so Game?
 2. We need the list of players that Team has, so Team?
 3. It feels like we'd like to model the Check as it's own aggregate, so Check?
 
 ???
-
-TODO start filling in the diagram.
-User => Check Attendance => Game => Attendance Check Started
-So far so good.
-
-If we look at #2, we'd like to see
-Request Team Attendance => Team => Team Attendance Check Started
-
-If we look at #3, we'd like to see
-Request Player Attedance => Attendance Check => Attendance Requested
-
-But we can't cross aggregate boundaries.
 
 ---
 # Process Manager
@@ -637,3 +934,7 @@ The Process Manager is our missing piece. They live downstream of the persisted 
 
 https://github.com/commanded/commanded
 https://github.com/slashdotdash
+
+
+Benefits:
+The core of your app really does work with out the web. Very little to do.
