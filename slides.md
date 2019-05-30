@@ -210,9 +210,14 @@ class: middle
 
 ???
 
-The main idea here is that there is code that models writing new data and then there is code that handles reads and that they can evolve separately.
+The main idea here is that we split the reading and writing code and infrastructure
+
+they can evolve separately.
+
+Events are projected to the read side into denormalized stores
 
 We'll see more on that shortly.
+
 
 ---
 class: middle, center, inverse
@@ -322,7 +327,7 @@ JoinTeam{team_id: 123, player: %{name: "Alice McGee", email: "alice@example.com"
 ---
 # Aggregates
 
-![Event Sourcing Diagram](images/attend_aggregates_02.svg)
+![Event Sourcing Diagram](images/attend_aggregates_01.svg)
 
 ```elixir
 %RegisterTeam{team_id: 1, name: "A")
@@ -330,12 +335,18 @@ JoinTeam{team_id: 123, player: %{name: "Alice McGee", email: "alice@example.com"
 
 ???
 
-We can get a sense for how aggregates work
+Commanded calls these GenServer processes Aggregates
 
-As mentioned they are GenServer who serialize access to a single instance.
+Let's get a better sense of how they work
 
-In essence they provided a transactional boundary around the aggregate. There can be no data races within a single aggregate or it's associated stream of events.
+---
+# Aggregates
 
+![Event Sourcing Diagram](images/attend_aggregates_02.svg)
+
+```elixir
+%RegisterTeam{team_id: 1, name: "A")
+```
 ---
 # Aggregates
 
@@ -399,7 +410,7 @@ In essence they provided a transactional boundary around the aggregate. There ca
 ![Event Sourcing Diagram](images/attend_aggregates_09.svg)
 
 ```elixir
-%StartGame{game_id 1} => :error
+%StartGame{game_id: 2} => :error
 ```
 
 ???
@@ -420,9 +431,11 @@ If we try to start Game 2, it's aggregate knows that it has been cancelled and w
 Likewise, if we try to add player 1 to team 1 again, that aggregate knows enough to reject the command.
 
 * Command only goes to 1 aggregate
-* Events order is only guaranteed within a stream (b/c of the aggregate)
 * An aggregate can only emit events in it's stream.
+
 * Aggregates are siloed, and do not talk directly to each other.
+
+In essence they provided a transactional boundary around the aggregate. There can be no data races within a single aggregate or it's associated stream of events.
 
 
 ---
@@ -628,17 +641,18 @@ class:
 
 # The story so far:
 
-* Each Aggregate will handle Commands sent to it by the Router
-* Any Events returned will be persisted to disk
-* Events in an Aggregate's stream will be applied to it
-* Each Aggregate will maintain enough internal state to validate Commands
-
-* Aggregates are running concurently with each other
-* Aggregates run serially internally
-* Express and capture a series of intents
-* Transform those into immutable facts
+# Aggregates
+* Handle Commands sent to it by the Router
+* Persist Events for us
+* Apply events against it's internal state
+* Validate Commands
+* Running concurently with each other
+* Run serially as they are GenServers
 
 ???
+
+* Express and capture a series of intents
+* Transform those into immutable facts
 
 ---
 class: middle, center, inverse
@@ -648,14 +662,13 @@ class: middle, center, inverse
 ???
 
 We can leave the write side for now and see how we get data out of the system. Queries are handled by the read side.
-The read side is a series of what is called projections of the events into an cohesive whole that we can query on.
+The read side is a series of what is called projections of the events into an cohesive whole that we can query against.
 
 ---
 
 # Show me the roster for a Team
 
-* For every read, we'd have to replay all of the events
-* Instead, maintain a view of the roster based on the events as they come through
+* Maintain a view of the roster based on the events as they come through
 * Much like a materialized view
 * Called Projections but are a specialization of an Event Handler
 
@@ -664,11 +677,8 @@ class:
 
 # Projections / Event Handlers
 
-* Populate caches/tables to handle queries from the UI
-* Built on the events from the Write side
 * Listens for Events and performs effects:
 * Writing to a cache, sending an email, etc
-* 1 elixir process per Projection
 
 ???
 
@@ -692,7 +702,7 @@ defmodule Attend.EventHandlers.TeamProjector do
 
 ???
 
-Here we have the Team detail projection. It's job is to listen for all of the events that it need to produce a blob of detail that the UI can use to fill out the detail view of the team. That means: Upcoming games, team members, name etc.
+Here we have the Team detail projection. It's job is to listen for all of the events that it need to produce a blob of detail that the UI can use to fill out the detail view of the team. That means: Team name, upcoming games, team members
 
 We start off by listening for the Team Register even and persist that to disk. Storage is not prescribed, I'm using redis here but I've hidden the details away behind a module.
 
@@ -776,7 +786,6 @@ class: inverse, center, middle
 # Sending the attendance email
 
 * For each player on a Team, send them an email asking for their attendance
-* In medias res
 * Required: Game ID, location, time, player name, email address
 * Use an Event handler to listen for GameScheduled and AttedanceRequested events
 
@@ -940,6 +949,8 @@ We've got all the data we need, but we can't cross aggregate boundaries to get a
 
 ???
 
+Check will be it's own aggregate so that it can hand the lifecycle of a particular player's attendance
+
 ---
 
 # Process Manager
@@ -996,6 +1007,8 @@ Really for a given Check we want that to happen for each player on the team
 
 This is where the Process manager comes in
 
+* Used to coordinate between aggregates
+* Model long running processes
 * Process managers are not started until they are needed
 * So no process exists yet.
 
@@ -1013,7 +1026,7 @@ When the Attendance Check Started event happens
 
 ???
 
-Commanded will start up a GenServer for *This* attendance check. It will be keyed on team_id
+Commanded will start up a GenServer for *This* attendance check. It will be keyed on game_id
 
 ---
 ### Request attendendance with a Process Manager
@@ -1021,7 +1034,7 @@ Commanded will start up a GenServer for *This* attendance check. It will be keye
 
 ???
 
-It will foward the details of the game and the team id to the next command
+The event payload includes the game details
 
 ---
 ### Request attendendance with a Process Manager
@@ -1029,7 +1042,7 @@ It will foward the details of the game and the team id to the next command
 
 ???
 
-And then send a Request Team Attendance Command to the Router
+This will be sent in a Request Team Attendance Command to the Router
 
 ---
 ### Request attendendance with a Process Manager
@@ -1083,12 +1096,13 @@ defmodule Attend.ProcessManagers.AttendanceCheckManager do
 
 ???
 
-This is our Proces Manager
+This is our Process Manager
 
 * It has a reference to the router so it can send commands
 * It defines a struct for maintaining state
 * It must let the library know if it is interested in a particular event
 * If it is interested, it must say that it wants to start, continue or stop the GenServer for this manager.
+* Keyed on game_id
 
 ---
 class:
@@ -1166,8 +1180,6 @@ class: inverse, middle, center
 
 ## Pros:
 * Elixir and Commanded fit very well with ES/CQRS
-* Write side transactional boundaries are clearly drawn
-* Tailor and optimize read side as requirements change
 * Excellent for inter-service communication
 * Fun, everything is new
 
