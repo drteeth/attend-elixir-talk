@@ -430,13 +430,15 @@ If we try to start Game 2, it's aggregate knows that it has been cancelled and w
 
 Likewise, if we try to add player 1 to team 1 again, that aggregate knows enough to reject the command.
 
-* Command only goes to 1 aggregate
-* An aggregate can only emit events in it's stream.
+---
 
-* Aggregates are siloed, and do not talk directly to each other.
+# Aggregates
 
-In essence they provided a transactional boundary around the aggregate. There can be no data races within a single aggregate or it's associated stream of events.
-
+* A Command only goes to 1 aggregate
+* An Aggregate can only emit Events in it's stream
+* Aggregates do not talk directly to each other
+* Represent a transactional boundary around some entity
+* Order is only guaranteed within it's stream
 
 ---
 class: inverse, middle, center
@@ -481,7 +483,7 @@ We create a new instance of a command, which are structs, and dispatch it with t
 class:
 # The Router
 
-* Maps commands to "Aggregates"
+* Maps Commands to Aggregates
 * Specifies an indentity field
 * Lazily spawns GenServers to handle commands
 
@@ -514,7 +516,7 @@ class:
 
 ```elixir
 defmodule Attend.Aggregates.Game do
-  defstruct [:game_id, :location, :team_id, :start_time,:status]
+  defstruct [:game_id, :location, :team_id, :start_time, :status]
 
   def execute(%Game{}, %ScheduleGame{} = command) do
     %GameScheduled{...}
@@ -522,18 +524,18 @@ defmodule Attend.Aggregates.Game do
 
   def execute(%Game{} = game, %CancelGame{} = command) do
     if game.state == :scheduled do
-      %GameCanceled{...}
+      %GameCancelled{...}
     else
       {:error, "A game must be scheduled to cancel it."}
     end
   end
 
   def apply(%Game{} = game, %GameScheduled{} = event) do
-    # update the local state based on the incoming event
+    # return a new game struct with the properties from event
   end
 
-  def apply(%Game{} = game, %GameCanceled{} = event) do
-    # update the local state based on the incoming event
+  def apply(%Game{} = game, %GameCancelled{} = event) do
+    # update game status to cancelled
   end
 end
 ```
@@ -553,7 +555,6 @@ class:
 
 # The Aggregate: execute/2
 
-* Acting as a Command Handler
 * Returns 0 or more events
 * Written to the event store for us by Commanded
 
@@ -619,7 +620,6 @@ class:
 * Called after the events have been persisted
 * Also called when re-hydrating the aggregate
 
-
 ```elixir
   def apply(%Game{} = game, %GameScheduled{} = event) do
     %{ game |
@@ -630,29 +630,15 @@ class:
         status: :scheduled
     }
   end
+
+  def apply(%Game{} = game, %GameCancelled{} = event) do
+    %{ game | status: :cancelled }
+  end
 ```
 
 ???
 
 Here we're setting up the initial state of our Game so we can validate further commands against it later.
-
----
-class:
-
-# The story so far:
-
-# Aggregates
-* Handle Commands sent to it by the Router
-* Persist Events for us
-* Apply events against it's internal state
-* Validate Commands
-* Running concurently with each other
-* Run serially as they are GenServers
-
-???
-
-* Express and capture a series of intents
-* Transform those into immutable facts
 
 ---
 class: middle, center, inverse
@@ -944,12 +930,14 @@ We've got all the data we need, but we can't cross aggregate boundaries to get a
 
 ### Which aggregate will handle the command?
 1. We need to validate against the status of Game, so Game?
-2. We need the list of players that Team has, so Team?
-3. It feels like we'd like to model the Check as it's own aggregate, so Check?
+2. But we can't check Team for it's playes from there
+3. We need the list of players that Team has, so Team?
+4. Can't chcek game status from there
+5. A new Check aggregate? Can't see Game or Team
 
 ???
 
-Check will be it's own aggregate so that it can hand the lifecycle of a particular player's attendance
+We're missing something
 
 ---
 
@@ -1092,6 +1080,7 @@ defmodule Attend.ProcessManagers.AttendanceCheckManager do
   def apply(state, event) do
     # Track whatever state is required
   end
+end
 ```
 
 ???
@@ -1182,11 +1171,17 @@ class: inverse, middle, center
 * Elixir and Commanded fit very well with ES/CQRS
 * Excellent for inter-service communication
 * Fun, everything is new
+* Scales well
+* Fits well with 80/20 Read/Write loads
+* Fits well with LiveView/Channel model
+* Commanded can be distributed
+* Built-in audit log
 
 ## Cons:
 * Unfamiliar to most devs
 * Finding aggregate boundaries is dificult
 * Hard, everything is new
+* Version events is scary
 
 ---
 class: center, middle, inverse
@@ -1199,3 +1194,14 @@ class: center, middle, inverse
 [github.com/drteeth](https://github.com/drteeth)
 
 [@benjamintmoss](https://twitter.com/benjamintmoss)
+
+
+---
+# Bonus round
+
+* Commanded swarm adapter
+* Microservices
+* Denormalized stores
+* GDPR
+* Eventual consistency
+* LiveView
